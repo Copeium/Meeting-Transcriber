@@ -12,8 +12,9 @@ import sounddevice as sd
 import myStream
 from pywhispercpp.model import Segment
 import pywhispercpp.utils as utils
-import logging
 from datetime import datetime
+import logging
+from pathlib import Path
 logging.basicConfig(level=logging.INFO)
 
 STYLESHEET = """
@@ -30,6 +31,33 @@ STYLESHEET = """
     }
 """
 
+
+
+class EmittingStream(QObject):
+    text_written = pyqtSignal(str)
+
+    def write(self, text):
+        self.text_written.emit(str(text))
+
+    def flush(self):  # needed for compatibility
+        pass
+
+class QtHandler(logging.Handler, QObject):
+    log_signal = pyqtSignal(str)
+
+    def __init__(self):
+        logging.Handler.__init__(self)
+        QObject.__init__(self)
+
+    def emit(self, record):
+        msg = self.format(record)
+        self.log_signal.emit(msg)
+
+class mySegment():
+    def __init__(self, start, end, text):
+        self.start = start
+        self.end = end
+        self.text = text
 
 class TranscriberUI(QMainWindow):
     def __init__(self):
@@ -52,6 +80,16 @@ class TranscriberUI(QMainWindow):
 
         self.segments = [] # Holds the segments for export
         self.streamer = None # Will hold the streaming object
+
+        sys.stdout = EmittingStream(text_written=self._append_terminal)
+        sys.stderr = EmittingStream(text_written=self._append_terminal)
+
+        handler = QtHandler()
+        handler.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
+        handler.log_signal.connect(self._append_terminal)
+
+        logging.getLogger().handlers.clear()
+        logging.getLogger().addHandler(handler)
 
         # Central widget and layout
         central_widget = QWidget()
@@ -170,43 +208,66 @@ class TranscriberUI(QMainWindow):
         self.table.setItem(row_position, 2, text_output)
         self.table.resizeRowsToContents()
         self.table.scrollToBottom()
-        self.segments.append(segment)
-    
+
+        my_segment = mySegment(start_time_str, end_time_str, segment.text.strip())
+        self.segments.append(my_segment)
+
     def _start_transcription(self):
         if self.streamer is None:
-            self._append_terminal("Loading model...")
+            print("Loading model...")
             self.streamer = myStream.Streaming(
                 model=self.model_dropdown.currentText(),
                 input_device=self.input_dropdown.currentData(),
                 segment_callback=self._on_new_segment
             )
             self.streamer.start()
-            self._append_terminal("Transcription started.")
+            print("Transcription started.")
         else:
-            self._append_terminal("Transcription already running.")
+            print("Transcription already running.")
 
     def _stop_transcription(self):
         if self.streamer is not None:
             self.streamer.stop()
             self.streamer = None
-            self._append_terminal("Transcription stopped.")
+            print("Transcription stopped.")
         else:
-            self._append_terminal("Transcription not running.")
+            print("Transcription not running.")
     
     def clear_output(self):
         self.table.setRowCount(0)
         self.segments = []
-        self._append_terminal("Output cleared.")
+        print("Output cleared.")
 
     def export_txt(self):
         if not self.segments:
-            self._append_terminal("No segments to export.")
+            print("No segments to export.")
             return
 
         date_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         output_filename = f"transcription_{date_time}.txt"
-        utils.output_txt(self.segments, output_filename)
-        self._append_terminal(f"Transcription exported to {output_filename}")
+
+        self.output_txt(output_filename)
+        print(f"Transcription exported to {output_filename}")
+    
+    def output_txt(self, output_file_path: str) -> str:
+        """
+        Creates a raw text from a list of segments
+
+        Implementation from `whisper.cpp/examples/main`
+
+        :param segments: list of segments
+        :return: path of the file
+        """
+        if not output_file_path.endswith('.txt'):
+            output_file_path = output_file_path + '.txt'
+
+        absolute_path = Path(output_file_path).absolute()
+
+        with open(str(absolute_path), 'w') as file:
+            for seg in self.segments:
+                file.write(f"[{seg.start}] " + seg.text)
+                file.write('\n\n')
+        return absolute_path
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
